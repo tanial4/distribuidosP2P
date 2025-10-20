@@ -52,7 +52,7 @@ function logMsg({ id, author, text }, mine=false){
 // --- API ---
 async function apiLogin(user, pass){
   // Bootstrap de login: ahora es Liz
-  const bootstrap = "http://192.168.1.11:8002";
+  const bootstrap = "http://148.220.211.106:8002";
   const res = await fetch(`${bootstrap}/login`, {
     method: "POST",
     headers: { "Content-Type":"application/json" },
