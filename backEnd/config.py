@@ -36,7 +36,7 @@ def get_cors_origins() -> list:
         return ["*"]
     return [x.strip() for x in raw.split(",") if x.strip()]
 
-# ⬇️ NUEVO: directorio y límite de subida
+
 def get_upload_dir() -> str:
     return get_env("UPLOAD_DIR", "uploads")
 

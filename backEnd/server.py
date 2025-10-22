@@ -2,15 +2,15 @@ import argparse
 import asyncio
 import os
 import uuid
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Query, UploadFile, File
-from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-# Imports locales
+
 from .auth import (
     issue_token, validate_credentials, require_bearer,
     get_assigned_peer, decode_token
@@ -21,9 +21,9 @@ from .config import (
 from sockets.peer_node import PeerNode
 
 app = FastAPI()
-node: PeerNode | None = None  # se setea en main()
+node: Optional[PeerNode] = None
 
-# ----- CORS (desde .env) -----
+# ---- CORS desde .env ----
 origins = get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
@@ -33,17 +33,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----- Archivos estáticos (uploads) -----
-UPLOAD_DIR = get_upload_dir()
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
-MAX_MB = get_max_upload_mb()
+# ---- Archivos Estáticos ----
+UPLOAD_DIR = get_upload_dir() #Asigna el nombre del directorio en el que se subirán
+os.makedirs(UPLOAD_DIR, exist_ok=True) ##Comprueba si el directorio existe, si no, lo crea
+app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files") #Hace pública la liga d elos archivos
+MAX_MB = get_max_upload_mb() #Asigna el peso máximo del archivo
 
-# ========== Endpoints básicos ==========
+
+# ---- EndPoints ----
+# -Comprueba que el servidor esté levantado
 @app.get("/health")
 async def health():
     return {"ok": True}
 
+# -Descubre qué peer soy (puerto y nombre)
 @app.get("/whoami")
 async def whoami():
     return {
@@ -51,18 +54,17 @@ async def whoami():
         "tcp_port": getattr(node, "tcp_port", None)
     }
 
-# ========== AUTH ==========
+
+# ---- AUTH (LogIn) -----
 @app.post("/login")
 async def login(body: dict):
     username = (body.get("username") or "").strip()
     password = (body.get("password") or "").strip()
     if not validate_credentials(username, password):
-        raise HTTPException(401, "Credenciales inválidas")
+        raise HTTPException(401, "Datos incorrectos, inténtalo nuevamente! (:")
 
     token = issue_token(username)
-    # El peer HTTP asignado por usuario viene de .env (USER_PEER_HTTP_JSON)
-    peer_http_base = get_assigned_peer(username)
-
+    peer_http_base = get_assigned_peer(username)  # viene del .env (USER_PEER_HTTP_JSON)
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -70,48 +72,45 @@ async def login(body: dict):
         "peer_http_base": peer_http_base,
     }
 
-# ========== CHAT PROTEGIDO ==========
+
+# ---- ENVIO DE MENSAJES PROTEGIDOS
 @app.post("/send")
 async def send(body: dict, payload = Depends(require_bearer)):
     if not node:
-        raise HTTPException(500, "Node not started")
+        raise HTTPException(500, "El nodo no se ha iniciado")
     text = (body.get("text") or "").strip()
     if not text:
-        raise HTTPException(400, "Text vacío")
-    author = payload.get("sub") or "desconocido"  # usuario del JWT
+        raise HTTPException(400, "Texto vacío")
+    author = payload.get("sub") or "desconocido"
     await node.broadcast(text, author)
     return {"ok": True}
 
 @app.get("/messages", response_class=PlainTextResponse)
 async def messages(after_id: int = 0, payload = Depends(require_bearer)):
     if not node:
-        raise HTTPException(500, "Node not started")
+        raise HTTPException(500, "El nodo no se ha iniciado")
     msgs = node.list_messages_after(after_id)
-    # Formato: id|author|text por línea
     return "\n".join(f"{mid}|{author}|{text}" for (mid, author, text) in msgs)
 
-# SSE autenticado (token en query porque SSE no manda headers custom)
+# SSE autenticado (token en query porque EventSource no manda headers)
 @app.get("/stream")
 async def stream(request: Request, token: str = Query(default="")):
     if not decode_token(token):
-        raise HTTPException(401, "Invalid token")
-
+        raise HTTPException(401, "Token Invalido")
     if not node:
-        raise HTTPException(500, "Node not started")
+        raise HTTPException(500, "El nodo no ses ha iniciado")
 
     async def gen():
-        gen_inner = node.sse_stream()
-        try:
-            async for chunk in gen_inner:
-                if await request.is_disconnected():
-                    break
-                yield chunk
-        finally:
-            pass
+        src = node.sse_stream()
+        async for chunk in src:
+            if await request.is_disconnected():
+                break
+            yield chunk
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
-# ========== UPLOAD DE ARCHIVOS ==========
+
+# ------ SUBEN ARCHIVOS --------
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -121,24 +120,19 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(400, "Archivo inválido")
 
-    # Límite de tamaño (simple). Para archivos grandes, escribir por chunks.
     data = await file.read()
     size_bytes = len(data)
     if size_bytes > MAX_MB * 1024 * 1024:
         raise HTTPException(413, f"Archivo demasiado grande (>{MAX_MB} MB)")
 
-    # Nombre seguro
     safe_name = "".join(ch for ch in file.filename if ch.isalnum() or ch in ("-", "_", ".", " ")).strip()
-    uid = uuid.uuid4().hex
-    disk_name = f"{uid}__{safe_name or 'file'}"
-
-    out_path = os.path.join(UPLOAD_DIR, disk_name)
-    with open(out_path, "wb") as f:
+    disk_name = f"{uuid.uuid4().hex}__{safe_name or 'file'}"
+    out = os.path.join(UPLOAD_DIR, disk_name)
+    with open(out, "wb") as f:
         f.write(data)
 
-    base = str(request.base_url).rstrip("/")  # p.ej. http://192.168.1.11:8002
+    base = str(request.base_url).rstrip("/")
     url = f"{base}/files/{disk_name}"
-
     return {
         "ok": True,
         "url": url,
@@ -147,26 +141,39 @@ async def upload_file(
         "mime": file.content_type or "application/octet-stream",
     }
 
-# ========== ARRANQUE DEL SERVIDOR ==========
+
+# Función Main
 def main():
-    parser = argparse.ArgumentParser(description="API HTTP puente para red P2P TCP (multi-dispositivo + uploads)")
+    parser = argparse.ArgumentParser(description="API HTTP + puente P2P")
     parser.add_argument("--name", required=True, help="Nombre del peer")
-    parser.add_argument("--tcp-port", type=int, required=True, help="Puerto TCP del peer (P2P)")
-    parser.add_argument("--http-port", type=int, required=True, help="Puerto HTTP de esta API")
-    parser.add_argument("--bootstrap", default="", help="Lista ip:puerto separados por coma, ej. 192.168.1.11:5002")
+    parser.add_argument("--tcp-port", type=int, required=True, help="Puerto TCP (P2P)")
+    parser.add_argument("--http-port", type=int, required=True, help="Puerto HTTP (API)")
+    parser.add_argument("--bootstrap", default="", help="ip:puerto separados por coma (ej. 148.220.211.106:5002)")
+    parser.add_argument("--advertise", default="", help="Mi host:puerto público (ej. 148.220.211.106:5002)")
     args = parser.parse_args()
 
+    adv = None
+    if args.advertise:
+        host, p = args.advertise.split(":", 1)
+        adv = (host.strip(), int(p))
+
     global node
-    node = PeerNode(args.name, args.tcp_port, parse_bootstrap(args.bootstrap))
+    node = PeerNode(
+        args.name,
+        args.tcp_port,
+        parse_bootstrap(args.bootstrap),
+        advertise=adv
+    )
 
     config = uvicorn.Config(app, host="0.0.0.0", port=args.http_port, loop="asyncio")
     server = uvicorn.Server(config)
 
     async def runner():
-        await node.start_background()  # inicia peer TCP
-        await server.serve()           # inicia API HTTP
+        await node.start_background()
+        await server.serve()
 
     asyncio.run(runner())
+
 
 if __name__ == "__main__":
     main()

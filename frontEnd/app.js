@@ -1,18 +1,19 @@
-// --- Estado global ---
+// ====== Config ======
+const BOOTSTRAP = "http://148.220.215.162:8002"; // Liz actuará de bootstrap
+
+
 let token = null;
 let username = null;
-let apiBase = null;      // asignado por backend en /login
-let es = null;           // EventSource
-let afterId = 0;         // último id confirmado desde backend
-const seenIds = new Set(); // ids ya pintados (SSE o pull)
-let pendingFile = null;    // archivo seleccionado
+let apiBase = null;      // asignado en /login según el usuario
+let es = null;
+let afterId = 0;
+const seenIds = new Set();
+let pendingFile = null;
 
 const $ = (id) => document.getElementById(id);
 
-// --- UI helpers ---
 function show(viewId){
-  $("loginView").classList.add("hidden");
-  $("chatView").classList.add("hidden");
+  ["loginView","chatView"].forEach(v => $(v).classList.add("hidden"));
   $(viewId).classList.remove("hidden");
 }
 
@@ -21,7 +22,6 @@ function escapeHTML(s){
 }
 
 function renderMessageContent(author, text){
-  // Intentar parsear JSON de archivo
   try {
     const obj = JSON.parse(text);
     if (obj && obj.type === "file" && obj.url && obj.name) {
@@ -29,9 +29,7 @@ function renderMessageContent(author, text){
       return `<div class="by">${author}</div>
               <div><a href="${obj.url}" target="_blank" rel="noopener noreferrer">${escapeHTML(obj.name)}</a>${sizeStr}</div>`;
     }
-  } catch(_) { /* texto normal */ }
-
-  // Texto normal
+  } catch(_) {}
   return `<div class="by">${author}</div><div>${escapeHTML(text)}</div>`;
 }
 
@@ -42,18 +40,15 @@ function logMsg({ id, author, text }, mine=false){
   item.innerHTML = renderMessageContent(author, text);
   wrap.appendChild(item);
   wrap.scrollTop = wrap.scrollHeight;
-
   if (id) {
     const n = Number(id);
     if (!Number.isNaN(n)) afterId = Math.max(afterId, n);
   }
 }
 
-// --- API ---
+// API
 async function apiLogin(user, pass){
-  // Bootstrap de login: ahora es Liz
-  const bootstrap = "http://148.220.211.106:8002";
-  const res = await fetch(`${bootstrap}/login`, {
+  const res = await fetch(`${BOOTSTRAP}/login`, {
     method: "POST",
     headers: { "Content-Type":"application/json" },
     body: JSON.stringify({ username: user, password: pass })
@@ -82,12 +77,11 @@ async function apiMessages(){
   if (!res.ok) throw new Error(await res.text());
   const txt = await res.text();
   const rows = txt.split("\n").filter(Boolean);
-
   for (const line of rows){
     const [idStr, author, text] = line.split("|");
     const id = Number(idStr || 0);
-    if (author === username) continue;      // no mostrar mis mensajes (los pinto local)
-    if (id && seenIds.has(id)) continue;    // dedupe
+    if (author === username) continue;
+    if (id && seenIds.has(id)) continue;
     logMsg({ id, author, text }, false);
     if (id) seenIds.add(id);
   }
@@ -102,43 +96,36 @@ async function apiUpload(file){
     body: form
   });
   if (!res.ok) throw new Error(await res.text());
-  return res.json(); // { ok, url, name, size, mime }
+  return res.json(); 
 }
 
-// --- SSE ---
+// SSE
 function connectSSE(){
   disconnectSSE();
   $("statusChip").textContent = "SSE: conectando…";
-
   es = new EventSource(`${apiBase}/stream?token=${encodeURIComponent(token)}`);
-
   es.onopen = () => { $("statusChip").textContent = "SSE: conectado"; };
   es.onerror = () => { $("statusChip").textContent = "SSE: error"; };
-
   es.onmessage = (e) => {
     const id = Number(e.lastEventId || 0);
     const idx = e.data.indexOf(": ");
     const author = idx > 0 ? e.data.slice(0, idx) : "desconocido";
     const text = idx > 0 ? e.data.slice(idx + 2) : e.data;
-    if (author === username) return;                  // ignora mis mensajes
-    if (id && (id <= afterId || seenIds.has(id))) return; // dedupe
+    if (author === username) return;
+    if (id && (id <= afterId || seenIds.has(id))) return;
     logMsg({ id, author, text }, false);
     if (id) seenIds.add(id);
   };
 }
+function disconnectSSE(){ if (es){ es.close(); es = null; } }
 
-function disconnectSSE(){
-  if (es) { es.close(); es = null; }
-}
-
-// --- Navegación ---
+// ====== Navegación ======
 function goChat(){
   $("userChip").textContent = `Usuario: ${username}`;
   $("peerChip").textContent = `Peer: ${apiBase}`;
   show("chatView");
   apiMessages().catch(console.warn).finally(connectSSE);
 }
-
 function goLogin(){
   disconnectSSE();
   token = null; username = null; apiBase = null; afterId = 0;
@@ -150,17 +137,16 @@ function goLogin(){
   show("loginView");
 }
 
-// --- Handlers ---
+// ====== Handlers ======
 $("btnLogin").onclick = async () => {
   const user = $("username").value.trim();
   const pass = $("password").value.trim();
   if (!user || !pass) { alert("Completa usuario y contraseña"); return; }
-
   try{
     const data = await apiLogin(user, pass);
     token = data.access_token;
     username = data.user || user;
-    apiBase = data.peer_http_base; // asignado por backend
+    apiBase = data.peer_http_base;
     goChat();
   }catch(e){
     console.error(e);
@@ -168,9 +154,7 @@ $("btnLogin").onclick = async () => {
   }
 };
 
-$("btnAttach").onclick = () => {
-  $("fileInput").click();
-};
+$("btnAttach").onclick = () => $("fileInput").click();
 
 $("fileInput").addEventListener("change", (e) => {
   const f = e.target.files && e.target.files[0];
@@ -187,42 +171,20 @@ $("fileInput").addEventListener("change", (e) => {
 $("btnSend").onclick = async () => {
   const input = $("text");
   const text = input.value.trim();
-
   if (!token) return;
 
   try{
-    // 1) si hay archivo, súbelo primero
     if (pendingFile) {
       const info = await apiUpload(pendingFile);
-      // arma payload de archivo
-      const payload = {
-        type: "file",
-        url: info.url,
-        name: info.name,
-        size: info.size,
-        mime: info.mime
-      };
+      const payload = { type: "file", url: info.url, name: info.name, size: info.size, mime: info.mime };
       await apiSend(JSON.stringify(payload));
-      // eco local como archivo
       logMsg({ id: null, author: username, text: JSON.stringify(payload) }, true);
-      // limpia selección
-      pendingFile = null;
-      $("fileName").textContent = "";
-      $("fileHint").style.display = "none";
-      $("fileInput").value = "";
+      pendingFile = null; $("fileName").textContent = ""; $("fileHint").style.display = "none"; $("fileInput").value = "";
     }
-
-    // 2) si hay texto, mándalo
     if (text) {
       await apiSend(text);
-      // eco local de texto
       logMsg({ id: null, author: username, text }, true);
-      input.value = "";
-    }
-
-    if (!text && !pendingFile) {
-      // nada que enviar
-      input.focus();
+      input.value = ""; input.focus();
     }
   }catch(e){
     console.error(e);
@@ -230,11 +192,8 @@ $("btnSend").onclick = async () => {
   }
 };
 
-$("text").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") $("btnSend").click();
-});
-
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnSend").click(); });
 $("btnLogout").onclick = goLogin;
 
-// Arranque: pantalla de login
+// arranque
 show("loginView");

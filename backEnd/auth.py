@@ -3,7 +3,7 @@ from typing import Optional
 import time, jwt  # PyJWT
 from .config import get_auth_secret, get_user_peer_map
 
-# Usuarios demo. (Para producción, muévelos a BD)
+# Usuarios demo
 USERS = {
     "mateo": "123456",
     "liz": "1234567890",
@@ -46,4 +46,4 @@ def require_bearer(authorization: Optional[str] = Header(None)):
     payload = decode_token(token)
     if not payload:
         raise HTTPException(401, "Invalid token")
-    return payload  # retornamos payload por si se necesita 'sub'
+    return payload 
